@@ -14,21 +14,28 @@ from __future__ import annotations
 import hashlib
 import logging
 import threading
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, final, override
 
 from findmy import FindMyAccessory, KeyPair
 
 if TYPE_CHECKING:
-    from datetime import datetime
-
     from findmy import KeyPairType
 
 _LOGGER = logging.getLogger(__name__)
 
 # Number of key indices kept per accessory (15 minutes each, so about 85 days). An accessory
 # that was not located for longer than this has a larger search window; the indices beyond the
-# limit are derived on demand as before.
+# limit are derived on demand.
 MAX_CACHED_INDICES = 8192
+
+# Number of newest key indices that are searched for an accessory. FindMy.py searches every
+# index since the last alignment, which never ends for an accessory that is not located any more
+# (empty battery, lost): after years that is ~100,000 indices, i.e. hundreds of requests to
+# Apple per fetch and more than a minute of key derivation per local refresh. Such an accessory
+# is only searched within this many indices (about 83 days) below the highest possible index;
+# the margin to MAX_CACHED_INDICES keeps the whole searched range in the cache.
+MAX_SEARCH_INDICES = MAX_CACHED_INDICES - 192
 
 # Deriving keys is CPU-bound Python and OpenSSL work that holds the GIL. Only one thread derives
 # at a time, so a restart with many accessories cannot starve the event loop from several
@@ -95,6 +102,11 @@ class CachedFindMyAccessory(FindMyAccessory):
         self._cache_floor: int = 0
         # Secondary keys are valid for many indices; share one object between them.
         self._interned: dict[bytes, CachedKeyPair] = {}
+
+    @override
+    def get_min_index(self, dt: datetime) -> int:
+        newest = self.get_max_index(datetime.now(tz=UTC))
+        return max(super().get_min_index(dt), newest - MAX_SEARCH_INDICES + 1)
 
     @override
     def keys_at(self, ind: int) -> set[KeyPair]:
